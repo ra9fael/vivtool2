@@ -35,15 +35,15 @@ struct CliOptions
 
 CliOptions ParseCliArgs(int argc, wchar_t* argv[]);
 std::vector<VivadoInstall> DetectVivadoInstallations();
-std::vector<VivadoInstall> AddCustomPath(const wchar_t* path);
+std::vector<VivadoInstall> AddCustomPath(const wchar_t* path, std::wstring& error);
 std::wstring GetAbsolutePath(const std::wstring& path);
-std::wstring LoadDefaultVersion();
-bool SaveDefaultVersion(const std::wstring& version);
+std::wstring LoadDefaultInstallPath();
+bool SaveDefaultInstallPath(const std::wstring& installPath);
 std::vector<RecentProject> LoadRecentProjects();
 void RememberRecentProject(const std::wstring& path, const std::wstring& version);
 bool ClearRecentProjects();
-std::wstring LoadProjectVersion(const std::wstring& path);
-bool SaveProjectVersion(const std::wstring& path, const std::wstring& version);
+std::wstring LoadProjectInstallPath(const std::wstring& path);
+bool SaveProjectInstallPath(const std::wstring& path, const std::wstring& installPath);
 bool RegisterXprFileAssociation();
 LaunchSettings LoadLaunchSettings();
 bool SaveLaunchSettings(const LaunchSettings& settings);

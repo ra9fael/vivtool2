@@ -8,6 +8,36 @@
 
 namespace fs = std::filesystem;
 
+// Non-throwing filesystem helpers: a bad drive, permission error or a removed
+// directory must never take the launcher down mid-scan.
+static bool PathExists(const fs::path& path)
+{
+    std::error_code ec;
+    return fs::exists(path, ec);
+}
+
+static void EnsureDirectory(const fs::path& path)
+{
+    std::error_code ec;
+    fs::create_directories(path, ec);
+}
+
+static std::vector<fs::path> ListSubdirectories(const fs::path& base)
+{
+    std::vector<fs::path> dirs;
+    std::error_code ec;
+    if (!fs::is_directory(base, ec))
+        return dirs;
+    fs::directory_iterator it(base, ec), end;
+    for (; it != end && !ec; it.increment(ec))
+    {
+        std::error_code entryEc;
+        if (it->is_directory(entryEc) && !entryEc)
+            dirs.push_back(it->path());
+    }
+    return dirs;
+}
+
 static std::wstring GetConfigPath()
 {
     wchar_t appData[MAX_PATH];
@@ -52,7 +82,7 @@ static void AppendLaunchLog(const std::wstring& message)
     auto logPath = GetLogFilePath();
     if (logPath.empty())
         return;
-    fs::create_directories(fs::path(logPath).parent_path());
+    EnsureDirectory(fs::path(logPath).parent_path());
     std::wofstream log(logPath, std::ios::app);
     if (log.is_open())
         log << message << L"\n";
@@ -82,8 +112,8 @@ static std::vector<std::wstring> LoadCustomPaths()
     if (!configPath.empty())
         legacyConfigPath = (fs::path(configPath).parent_path() / L"paths.json").native();
 
-    std::wstring inputPath = fs::exists(configPath) ? configPath : legacyConfigPath;
-    if (fs::exists(inputPath))
+    std::wstring inputPath = PathExists(configPath) ? configPath : legacyConfigPath;
+    if (PathExists(inputPath))
     {
         std::wifstream file(inputPath);
         if (file.is_open())
@@ -98,7 +128,7 @@ static std::vector<std::wstring> LoadCustomPaths()
                 {
                     fs::path rootPath = NormalizeVivadoPath(line);
                     fs::path vivadoBat = rootPath / L"bin\\vivado.bat";
-                    if (fs::exists(vivadoBat))
+                    if (PathExists(vivadoBat))
                     {
                         paths.push_back(rootPath.native());
                     }
@@ -113,7 +143,7 @@ static std::vector<std::wstring> LoadCustomPaths()
 static fs::path FindVivadoExe(const fs::path& basePath)
 {
     fs::path batPath = basePath / L"bin\\vivado.bat";
-    if (fs::exists(batPath))
+    if (PathExists(batPath))
     {
         return batPath;
     }
@@ -134,33 +164,13 @@ static std::vector<VivadoInstall> ScanOldStructure(const fs::path& basePath)
 {
     std::vector<VivadoInstall> installs;
 
-    if (!fs::exists(basePath) || !fs::is_directory(basePath))
+    // Legacy layout: <drive>\Xilinx\Vivado\<version>\bin\vivado.bat
+    for (const auto& entry : ListSubdirectories(basePath / L"Vivado"))
     {
-        return installs;
-    }
-
-    fs::path vivadoPath = basePath / L"Vivado";
-    if (!fs::exists(vivadoPath) || !fs::is_directory(vivadoPath))
-    {
-        return installs;
-    }
-
-    for (const auto& entry : fs::directory_iterator(vivadoPath))
-    {
-        if (!entry.is_directory())
-        {
-            continue;
-        }
-
-        std::wstring version = entry.path().filename().native();
-        auto exePath = FindVivadoExe(entry.path());
-
+        auto exePath = FindVivadoExe(entry);
         if (exePath.empty())
-        {
             continue;
-        }
-
-        installs.push_back(MakeInstall(version, entry.path(), exePath));
+        installs.push_back(MakeInstall(entry.filename().native(), entry, exePath));
     }
 
     return installs;
@@ -170,34 +180,14 @@ static std::vector<VivadoInstall> ScanNewStructure(const fs::path& basePath)
 {
     std::vector<VivadoInstall> installs;
 
-    if (!fs::exists(basePath) || !fs::is_directory(basePath))
+    // Newer layout: <drive>\Xilinx\<version>\Vivado\bin\vivado.bat
+    for (const auto& entry : ListSubdirectories(basePath))
     {
-        return installs;
-    }
-
-    for (const auto& entry : fs::directory_iterator(basePath))
-    {
-        if (!entry.is_directory())
-        {
-            continue;
-        }
-
-        std::wstring version = entry.path().filename().native();
-        fs::path vivadoSubdir = entry.path() / L"Vivado";
-
-        if (!fs::exists(vivadoSubdir) || !fs::is_directory(vivadoSubdir))
-        {
-            continue;
-        }
-
+        fs::path vivadoSubdir = entry / L"Vivado";
         auto exePath = FindVivadoExe(vivadoSubdir);
-
         if (exePath.empty())
-        {
             continue;
-        }
-
-        installs.push_back(MakeInstall(version, vivadoSubdir, exePath));
+        installs.push_back(MakeInstall(entry.filename().native(), vivadoSubdir, exePath));
     }
 
     return installs;
@@ -207,29 +197,14 @@ static std::vector<VivadoInstall> ScanAMDStructure(const fs::path& basePath)
 {
     std::vector<VivadoInstall> installs;
 
-    if (!fs::exists(basePath) || !fs::is_directory(basePath))
+    // AMD's current installer uses <drive>\AMDDesignTools\<version>\Vivado.
+    for (const auto& entry : ListSubdirectories(basePath))
     {
-        return installs;
-    }
-
-    for (const auto& entry : fs::directory_iterator(basePath))
-    {
-        if (!entry.is_directory())
-        {
-            continue;
-        }
-
-        std::wstring version = entry.path().filename().native();
-        // AMD's current installer uses AMDDesignTools\\<version>\\Vivado.
-        fs::path installPath = entry.path() / L"Vivado";
+        fs::path installPath = entry / L"Vivado";
         auto exePath = FindVivadoExe(installPath);
-
         if (exePath.empty())
-        {
             continue;
-        }
-
-        installs.push_back(MakeInstall(version, installPath, exePath));
+        installs.push_back(MakeInstall(entry.filename().native(), installPath, exePath));
     }
 
     return installs;
@@ -295,7 +270,19 @@ static bool CompareVersions(const VivadoInstall& a, const VivadoInstall& b)
     auto [bmaj, bmin] = parseVersion(b.version);
 
     if (amaj != bmaj) return amaj > bmaj;
-    return amin > bmin;
+    if (amin != bmin) return amin > bmin;
+    // Stable secondary order so equal versions keep a deterministic position.
+    return _wcsicmp(a.path.c_str(), b.path.c_str()) < 0;
+}
+
+// Case-insensitive, fully-resolved path identity used for dedup and binding.
+static std::wstring PathKey(const std::wstring& path)
+{
+    std::wstring key = GetAbsolutePath(path);
+    while (!key.empty() && (key.back() == L'\\' || key.back() == L'/'))
+        key.pop_back();
+    std::transform(key.begin(), key.end(), key.begin(), towlower);
+    return key;
 }
 
 static void Deduplicate(std::vector<VivadoInstall>& installs)
@@ -303,7 +290,7 @@ static void Deduplicate(std::vector<VivadoInstall>& installs)
     std::sort(installs.begin(), installs.end(), CompareVersions);
     auto it = std::unique(installs.begin(), installs.end(),
         [](const VivadoInstall& a, const VivadoInstall& b) {
-            return a.exePath == b.exePath;
+            return PathKey(a.exePath) == PathKey(b.exePath);
         });
     installs.erase(it, installs.end());
 }
@@ -357,38 +344,99 @@ std::vector<VivadoInstall> DetectVivadoInstallations()
     return installs;
 }
 
-std::vector<VivadoInstall> AddCustomPath(const wchar_t* path)
+std::vector<VivadoInstall> AddCustomPath(const wchar_t* path, std::wstring& error)
 {
-    auto configPath = GetConfigPath();
-    fs::path rootPath = NormalizeVivadoPath(path ? path : L"");
-
-    fs::create_directories(fs::path(configPath).parent_path());
-
-    std::wofstream file(configPath, std::ios::app);
-    if (file.is_open())
+    error.clear();
+    if (!path || !*path)
     {
-        file << rootPath.native() << L"\n";
+        error = L"Path is empty.";
+        return {};
+    }
+
+    auto configPath = GetConfigPath();
+    if (configPath.empty())
+    {
+        error = L"Cannot resolve the configuration folder.";
+        return {};
+    }
+
+    fs::path rootPath = NormalizeVivadoPath(path);
+    if (!PathExists(rootPath / L"bin\\vivado.bat"))
+    {
+        error = L"No bin\\vivado.bat found under this path.";
+        return {};
+    }
+
+    std::wstring newPath = rootPath.native();
+    for (const auto& existing : LoadCustomPaths())
+    {
+        if (_wcsicmp(existing.c_str(), newPath.c_str()) == 0)
+        {
+            error = L"This path is already registered.";
+            return {};
+        }
+    }
+
+    EnsureDirectory(fs::path(configPath).parent_path());
+    std::wofstream file(configPath, std::ios::app);
+    if (!file.is_open())
+    {
+        error = L"Cannot write the paths file.";
+        return {};
+    }
+    file << newPath << L"\n";
+    file.flush();
+    if (!file.good())
+    {
+        error = L"Cannot write the paths file.";
+        return {};
     }
 
     return DetectVivadoInstallations();
 }
 
-std::wstring LoadDefaultVersion()
+static bool MatchInstallByVersion(const std::wstring& version, std::wstring& installPath)
 {
-    wchar_t value[64] = {};
-    auto settingsPath = GetSettingsFilePath();
-    GetPrivateProfileStringW(L"vivlauncher", L"default_version", L"", value,
-                             ARRAYSIZE(value), settingsPath.c_str());
-    return value;
+    if (version.empty())
+        return false;
+    for (const auto& inst : DetectVivadoInstallations())
+    {
+        if (_wcsicmp(inst.version.c_str(), version.c_str()) == 0)
+        {
+            installPath = inst.path;
+            return true;
+        }
+    }
+    return false;
 }
 
-bool SaveDefaultVersion(const std::wstring& version)
+std::wstring LoadDefaultInstallPath()
+{
+    wchar_t value[MAX_PATH * 2] = {};
+    auto settingsPath = GetSettingsFilePath();
+    if (settingsPath.empty())
+        return {};
+    GetPrivateProfileStringW(L"vivlauncher", L"default_install", L"", value,
+                             ARRAYSIZE(value), settingsPath.c_str());
+    if (value[0])
+        return value;
+    // Migrate from the legacy default_version key.
+    wchar_t old[64] = {};
+    GetPrivateProfileStringW(L"vivlauncher", L"default_version", L"", old,
+                             ARRAYSIZE(old), settingsPath.c_str());
+    std::wstring path;
+    if (MatchInstallByVersion(old, path))
+        return path;
+    return {};
+}
+
+bool SaveDefaultInstallPath(const std::wstring& installPath)
 {
     auto settingsPath = GetSettingsFilePath();
     if (settingsPath.empty())
         return false;
-    fs::create_directories(fs::path(settingsPath).parent_path());
-    return WritePrivateProfileStringW(L"vivlauncher", L"default_version", version.c_str(),
+    EnsureDirectory(fs::path(settingsPath).parent_path());
+    return WritePrivateProfileStringW(L"vivlauncher", L"default_install", installPath.c_str(),
                                       settingsPath.c_str()) != FALSE;
 }
 
@@ -413,7 +461,7 @@ std::vector<RecentProject> LoadRecentProjects()
         RecentProject project;
         project.version = separator == std::wstring::npos ? L"" : item.substr(0, separator);
         project.path = separator == std::wstring::npos ? item : item.substr(separator + 1);
-        if (!project.path.empty() && fs::exists(project.path))
+        if (!project.path.empty() && PathExists(project.path))
             projects.push_back(std::move(project));
     }
     return projects;
@@ -424,7 +472,7 @@ void RememberRecentProject(const std::wstring& path, const std::wstring& version
     auto settingsPath = GetSettingsFilePath();
     if (settingsPath.empty())
         return;
-    fs::create_directories(fs::path(settingsPath).parent_path());
+    EnsureDirectory(fs::path(settingsPath).parent_path());
 
     std::vector<RecentProject> projects{{path, version}};
     for (const auto& project : LoadRecentProjects())
@@ -458,25 +506,37 @@ bool ClearRecentProjects()
                                       settingsPath.c_str()) != FALSE;
 }
 
-std::wstring LoadProjectVersion(const std::wstring& path)
+std::wstring LoadProjectInstallPath(const std::wstring& path)
 {
-    wchar_t value[64] = {};
+    wchar_t value[MAX_PATH * 2] = {};
     auto settingsPath = GetSettingsFilePath();
+    if (settingsPath.empty())
+        return {};
     std::wstring absolutePath = GetAbsolutePath(path);
-    GetPrivateProfileStringW(L"project_versions", ProjectSettingsKey(absolutePath).c_str(), L"",
+    std::wstring key = ProjectSettingsKey(absolutePath);
+    GetPrivateProfileStringW(L"project_installs", key.c_str(), L"",
                              value, ARRAYSIZE(value), settingsPath.c_str());
-    return value;
+    if (value[0])
+        return value;
+    // Migrate from the legacy version-only binding.
+    wchar_t old[64] = {};
+    GetPrivateProfileStringW(L"project_versions", key.c_str(), L"",
+                             old, ARRAYSIZE(old), settingsPath.c_str());
+    std::wstring installPath;
+    if (MatchInstallByVersion(old, installPath))
+        return installPath;
+    return {};
 }
 
-bool SaveProjectVersion(const std::wstring& path, const std::wstring& version)
+bool SaveProjectInstallPath(const std::wstring& path, const std::wstring& installPath)
 {
     auto settingsPath = GetSettingsFilePath();
     if (settingsPath.empty())
         return false;
-    fs::create_directories(fs::path(settingsPath).parent_path());
+    EnsureDirectory(fs::path(settingsPath).parent_path());
     std::wstring absolutePath = GetAbsolutePath(path);
-    return WritePrivateProfileStringW(L"project_versions", ProjectSettingsKey(absolutePath).c_str(),
-                                      version.c_str(), settingsPath.c_str()) != FALSE;
+    return WritePrivateProfileStringW(L"project_installs", ProjectSettingsKey(absolutePath).c_str(),
+                                      installPath.c_str(), settingsPath.c_str()) != FALSE;
 }
 
 bool RegisterXprFileAssociation()
@@ -491,18 +551,22 @@ bool RegisterXprFileAssociation()
                         REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
         return false;
     const wchar_t* progId = L"VivLauncher.Project";
-    RegSetValueExW(key, nullptr, 0, REG_SZ, (const BYTE*)progId,
-                   (DWORD)((wcslen(progId) + 1) * sizeof(wchar_t)));
+    LRESULT setProgId = RegSetValueExW(key, nullptr, 0, REG_SZ, (const BYTE*)progId,
+                                       (DWORD)((wcslen(progId) + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
+    if (setProgId != ERROR_SUCCESS)
+        return false;
 
     if (RegCreateKeyExW(HKEY_CURRENT_USER,
                         L"Software\\Classes\\VivLauncher.Project\\shell\\open\\command",
                         0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
         return false;
     std::wstring command = L"\"" + std::wstring(modulePath) + L"\" \"%1\"";
-    RegSetValueExW(key, nullptr, 0, REG_SZ, (const BYTE*)command.c_str(),
-                   (DWORD)((command.size() + 1) * sizeof(wchar_t)));
+    LRESULT setCommand = RegSetValueExW(key, nullptr, 0, REG_SZ, (const BYTE*)command.c_str(),
+                                        (DWORD)((command.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
+    if (setCommand != ERROR_SUCCESS)
+        return false;
 
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return true;
@@ -527,7 +591,7 @@ bool SaveLaunchSettings(const LaunchSettings& settings)
     auto settingsPath = GetSettingsFilePath();
     if (settingsPath.empty())
         return false;
-    fs::create_directories(fs::path(settingsPath).parent_path());
+    EnsureDirectory(fs::path(settingsPath).parent_path());
     bool ok = WritePrivateProfileStringW(L"launch", L"no_log", settings.noLog ? L"1" : L"0",
                                          settingsPath.c_str()) != FALSE;
     ok = WritePrivateProfileStringW(L"launch", L"no_journal", settings.noJournal ? L"1" : L"0",
@@ -622,8 +686,8 @@ bool LaunchVivado(const wchar_t* vivadoExePath, const wchar_t* xprFilePath,
         workingDirectory = fs::path(xprFilePath).parent_path().native();
 
     BOOL ok = CreateProcessW(
-        exeToLaunch.c_str(),            // lpApplicationName — direct file path, Unicode-safe, no parsing
-        cmdLine.data(),                 // lpCommandLine — argv for child process
+        exeToLaunch.c_str(),            // lpApplicationName - direct file path, Unicode-safe, no parsing
+        cmdLine.data(),                 // lpCommandLine - argv for child process
         nullptr, nullptr,
         FALSE,
         0,

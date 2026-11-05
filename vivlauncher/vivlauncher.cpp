@@ -116,9 +116,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             fwprintf(stderr, L"Error: --add requires a path argument\n");
             return 1;
         }
-        AddCustomPath(opts.customPath.c_str());
-        wprintf(L"Added: %s\n", opts.customPath.c_str());
-        return 0;
+        std::wstring error;
+        auto installs = AddCustomPath(opts.customPath.c_str(), error);
+        if (error.empty())
+        {
+            wprintf(L"Added: %s\n", opts.customPath.c_str());
+            for (const auto& inst : installs)
+                wprintf(L"  [%s] %s\n", inst.version.c_str(), inst.exePath.c_str());
+            return 0;
+        }
+        fwprintf(stderr, L"Error: %s\n", error.c_str());
+        return 1;
     }
 
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);

@@ -13,6 +13,19 @@ static std::wstring g_xprFilePath;
 static int g_selectedIndex = 0;
 static WNDPROC g_oldListBoxProc = nullptr;
 
+static bool PathExists(const fs::path& path)
+{
+    std::error_code ec;
+    return fs::exists(path, ec);
+}
+
+static bool SamePath(const std::wstring& a, const std::wstring& b)
+{
+    if (a.empty() || b.empty())
+        return false;
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
 static void ShowHelp(HWND hWnd)
 {
     MessageBoxW(hWnd,
@@ -188,7 +201,15 @@ INT_PTR CALLBACK AddPathDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 
             if (path[0])
             {
-                g_installs = AddCustomPath(path);
+                std::wstring error;
+                auto installs = AddCustomPath(path, error);
+                if (!error.empty())
+                {
+                    MessageBoxW(hDlg, error.c_str(), L"Cannot add path",
+                                MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                g_installs = installs;
                 EndDialog(hDlg, 1);
             }
             return TRUE;
@@ -281,12 +302,12 @@ static void PopulateMainInstallList(HWND hDlg)
 {
     HWND hList = GetDlgItem(hDlg, IDC_INSTALL_LIST);
     SendMessageW(hList, LB_RESETCONTENT, 0, 0);
-    std::wstring defaultVersion = LoadDefaultVersion();
+    std::wstring defaultPath = LoadDefaultInstallPath();
     wchar_t projectPath[32768] = {};
     GetWindowTextW(GetDlgItem(hDlg, IDC_PROJECT_PATH), projectPath, ARRAYSIZE(projectPath));
-    std::wstring boundVersion = LoadProjectVersion(projectPath);
-    if (!boundVersion.empty())
-        defaultVersion = boundVersion;
+    std::wstring boundPath = LoadProjectInstallPath(projectPath);
+    if (!boundPath.empty())
+        defaultPath = boundPath;
     int defaultIndex = -1;
 
     for (size_t i = 0; i < g_mainInstalls.size(); ++i)
@@ -295,7 +316,7 @@ static void PopulateMainInstallList(HWND hDlg)
         std::wstring text = install.version + L"    " + install.path;
         int item = (int)SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)text.c_str());
         SendMessageW(hList, LB_SETITEMDATA, item, (LPARAM)i);
-        if (_wcsicmp(install.version.c_str(), defaultVersion.c_str()) == 0)
+        if (SamePath(install.path, defaultPath))
             defaultIndex = item;
     }
 
@@ -341,7 +362,7 @@ static bool OpenMainProject(HWND hDlg)
     wchar_t path[32768] = {};
     GetWindowTextW(GetDlgItem(hDlg, IDC_PROJECT_PATH), path, ARRAYSIZE(path));
     std::wstring projectPath = GetAbsolutePath(path);
-    if (projectPath.empty() || !fs::exists(projectPath))
+    if (projectPath.empty() || !PathExists(projectPath))
     {
         MessageBoxW(hDlg, L"Please select an existing Vivado .xpr project.", L"Project not found",
                     MB_OK | MB_ICONWARNING);
@@ -362,10 +383,19 @@ static bool OpenMainProject(HWND hDlg)
         return false;
 
     const auto& install = g_mainInstalls[index];
-    std::wstring boundVersion = LoadProjectVersion(projectPath);
-    if (!boundVersion.empty() && _wcsicmp(boundVersion.c_str(), install.version.c_str()) != 0)
+    std::wstring boundPath = LoadProjectInstallPath(projectPath);
+    if (!boundPath.empty() && !SamePath(boundPath, install.path))
     {
-        std::wstring message = L"This project is bound to Vivado " + boundVersion +
+        std::wstring boundVersion = L"a different Vivado version";
+        for (const auto& inst : g_mainInstalls)
+        {
+            if (SamePath(inst.path, boundPath))
+            {
+                boundVersion = L"Vivado " + inst.version;
+                break;
+            }
+        }
+        std::wstring message = L"This project is bound to " + boundVersion +
                                L", but Vivado " + install.version + L" is selected.\n\nContinue anyway?";
         if (MessageBoxW(hDlg, message.c_str(), L"Vivado version mismatch",
                         MB_YESNO | MB_ICONWARNING) != IDYES)
@@ -516,7 +546,7 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                 int index = (int)SendMessageW(hList, LB_GETITEMDATA, item, 0);
                 if (index >= 0 && index < (int)g_mainInstalls.size())
                 {
-                    SaveDefaultVersion(g_mainInstalls[index].version);
+                    SaveDefaultInstallPath(g_mainInstalls[index].path);
                     MessageBoxW(hDlg, L"The selected Vivado version is now the default.",
                                 L"Vivado Launcher", MB_OK | MB_ICONINFORMATION);
                 }
@@ -530,7 +560,7 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             std::wstring projectPath = GetAbsolutePath(path);
             HWND hList = GetDlgItem(hDlg, IDC_INSTALL_LIST);
             int item = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
-            if (projectPath.empty() || !fs::exists(projectPath) || item < 0)
+            if (projectPath.empty() || !PathExists(projectPath) || item < 0)
             {
                 MessageBoxW(hDlg, L"Select an existing project and Vivado version first.",
                             L"Vivado Launcher", MB_OK | MB_ICONWARNING);
@@ -538,7 +568,7 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             }
             int index = (int)SendMessageW(hList, LB_GETITEMDATA, item, 0);
             if (index >= 0 && index < (int)g_mainInstalls.size() &&
-                SaveProjectVersion(projectPath, g_mainInstalls[index].version))
+                SaveProjectInstallPath(projectPath, g_mainInstalls[index].path))
             {
                 MessageBoxW(hDlg, L"This project will use the selected Vivado version next time.",
                             L"Vivado Launcher", MB_OK | MB_ICONINFORMATION);
@@ -556,7 +586,7 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         if (id == IDC_VIEW_LOG)
         {
             auto logPath = GetLogFilePath();
-            if (!fs::exists(logPath))
+            if (!PathExists(logPath))
             {
                 MessageBoxW(hDlg, L"No launch log has been created yet.", L"Vivado Launcher",
                             MB_OK | MB_ICONINFORMATION);
