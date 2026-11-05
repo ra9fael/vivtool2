@@ -47,7 +47,6 @@ static HBRUSH GetThemeBrush(COLORREF color)
 static HFONT g_fontItemTitle = nullptr; // list item primary line
 static HFONT g_fontItemPath = nullptr;  // list item secondary line
 static HFONT g_fontNav = nullptr;       // sidebar entries and buttons
-static WNDPROC g_oldOwnerBtnProc = nullptr;
 
 struct ButtonVisual
 {
@@ -55,6 +54,7 @@ struct ButtonVisual
     bool pressed = false;
 };
 static std::map<HWND, ButtonVisual> g_btnVisual;
+static std::map<HWND, WNDPROC> g_oldBtnProcs;
 
 static int DpiForHwnd(HWND hWnd)
 {
@@ -161,16 +161,25 @@ static LRESULT CALLBACK OwnerButtonProc(HWND hWnd, UINT message, WPARAM wParam, 
         break;
     case WM_DESTROY:
         g_btnVisual.erase(hWnd);
+        g_oldBtnProcs.erase(hWnd);
         break;
     }
-    return CallWindowProcW(g_oldOwnerBtnProc, hWnd, message, wParam, lParam);
+    // The stock button proc forwards WM_PAINT as WM_DRAWITEM to the parent and
+    // handles WM_GETDLGCODE etc., so every message must reach it.
+    auto proc = g_oldBtnProcs.find(hWnd);
+    if (proc != g_oldBtnProcs.end())
+        return CallWindowProcW(proc->second, hWnd, message, wParam, lParam);
+    return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
 static void SubclassOwnerButton(HWND hDlg, int id)
 {
     HWND h = GetDlgItem(hDlg, id);
     if (h)
-        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)OwnerButtonProc);
+    {
+        WNDPROC oldProc = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)OwnerButtonProc);
+        g_oldBtnProcs[h] = oldProc;
+    }
 }
 
 static void DrawOwnerButton(const DRAWITEMSTRUCT* dis)
