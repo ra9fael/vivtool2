@@ -1,9 +1,14 @@
 #include "SelectorDialog.h"
 #include "vivlauncher.h"
+#include "theme.h"
 #include <string>
 #include <vector>
 #include <filesystem>
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <map>
+
+#pragma comment(lib, "dwmapi.lib")
 
 namespace fs = std::filesystem;
 
@@ -24,6 +29,321 @@ static bool SamePath(const std::wstring& a, const std::wstring& b)
     if (a.empty() || b.empty())
         return false;
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// Dark theme drawing shared by all dialogs
+// ---------------------------------------------------------------------------
+
+static HBRUSH GetThemeBrush(COLORREF color)
+{
+    static std::map<COLORREF, HBRUSH> cache;
+    auto it = cache.find(color);
+    if (it == cache.end())
+        it = cache.insert({ color, CreateSolidBrush(color) }).first;
+    return it->second;
+}
+
+static HFONT g_fontItemTitle = nullptr; // list item primary line
+static HFONT g_fontItemPath = nullptr;  // list item secondary line
+static HFONT g_fontNav = nullptr;       // sidebar entries and buttons
+static WNDPROC g_oldOwnerBtnProc = nullptr;
+
+struct ButtonVisual
+{
+    bool hover = false;
+    bool pressed = false;
+};
+static std::map<HWND, ButtonVisual> g_btnVisual;
+
+static int DpiForHwnd(HWND hWnd)
+{
+    HDC dc = GetDC(hWnd);
+    int dpi = GetDeviceCaps(dc, LOGPIXELSX);
+    ReleaseDC(hWnd, dc);
+    return dpi;
+}
+
+static void EnsureThemeFonts(HWND hWnd)
+{
+    if (g_fontItemTitle)
+        return;
+    int dpi = DpiForHwnd(hWnd);
+    g_fontItemTitle = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_fontItemPath = CreateFontW(-MulDiv(8, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_fontNav = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+static void DestroyThemeFonts()
+{
+    if (g_fontItemTitle) { DeleteObject(g_fontItemTitle); g_fontItemTitle = nullptr; }
+    if (g_fontItemPath) { DeleteObject(g_fontItemPath); g_fontItemPath = nullptr; }
+    if (g_fontNav) { DeleteObject(g_fontNav); g_fontNav = nullptr; }
+}
+
+static void ApplyWindowChrome(HWND hDlg)
+{
+    BOOL dark = TRUE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE: dark caption on Win10 1809+ and Win11.
+    DwmSetWindowAttribute(hDlg, 20, &dark, sizeof(dark));
+    // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND (2); ignored on Win10.
+    DWORD roundCorners = 2;
+    DwmSetWindowAttribute(hDlg, 33, &roundCorners, sizeof(roundCorners));
+}
+
+static bool IsSectionLabel(int id)
+{
+    switch (id)
+    {
+    case IDC_PROJECT_LABEL: case IDC_RECENT_LABEL: case IDC_INSTALL_LABEL:
+    case IDC_ADDITIONAL_LABEL: case IDC_DIAGNOSTIC_LABEL: case IDC_LOG_LABEL:
+    case IDC_CONFIG_LABEL: case IDC_HELP_LABEL: case IDC_STATIC:
+        return true;
+    }
+    return false;
+}
+
+static LRESULT DarkDialogColor(UINT message, WPARAM wParam, LPARAM lParam)
+{
+    HDC dc = (HDC)wParam;
+    switch (message)
+    {
+    case WM_CTLCOLORDLG:
+        return (LRESULT)GetThemeBrush(theme::WindowBg);
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(dc, IsSectionLabel(GetDlgCtrlID((HWND)lParam)) ? theme::TextMuted : theme::TextPrimary);
+        SetBkMode(dc, TRANSPARENT);
+        return (LRESULT)GetThemeBrush(theme::WindowBg);
+    case WM_CTLCOLOREDIT:
+        SetTextColor(dc, theme::TextPrimary);
+        SetBkMode(dc, TRANSPARENT);
+        return (LRESULT)GetThemeBrush(theme::PanelBg);
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)GetThemeBrush(theme::PanelBg);
+    }
+    return 0;
+}
+
+static LRESULT CALLBACK OwnerButtonProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    auto it = g_btnVisual.find(hWnd);
+    if (it == g_btnVisual.end())
+        it = g_btnVisual.insert({ hWnd, ButtonVisual() }).first;
+    ButtonVisual& vis = it->second;
+    switch (message)
+    {
+    case WM_MOUSEMOVE:
+        if (!vis.hover)
+        {
+            vis.hover = true;
+            TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hWnd, 0 };
+            TrackMouseEvent(&tme);
+            InvalidateRect(hWnd, nullptr, TRUE);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        vis.hover = false;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_LBUTTONDOWN:
+        vis.pressed = true;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_LBUTTONUP:
+        vis.pressed = false;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_DESTROY:
+        g_btnVisual.erase(hWnd);
+        break;
+    }
+    return CallWindowProcW(g_oldOwnerBtnProc, hWnd, message, wParam, lParam);
+}
+
+static void SubclassOwnerButton(HWND hDlg, int id)
+{
+    HWND h = GetDlgItem(hDlg, id);
+    if (h)
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)OwnerButtonProc);
+}
+
+static void DrawOwnerButton(const DRAWITEMSTRUCT* dis)
+{
+    bool primary = dis->CtlID == IDC_OPEN_PROJECT || dis->CtlID == IDOK;
+    const ButtonVisual& vis = g_btnVisual[dis->hwndItem];
+
+    COLORREF bg = primary ? theme::Accent : theme::BtnBg;
+    COLORREF fg = primary ? theme::AccentText : theme::TextPrimary;
+    COLORREF border = primary ? theme::Accent : theme::BtnBorder;
+    if (dis->itemState & ODS_DISABLED)
+    {
+        bg = theme::PanelBg;
+        fg = theme::TextMuted;
+        border = theme::PanelBorder;
+    }
+    else if (vis.pressed)
+    {
+        bg = primary ? theme::AccentDim : theme::PressedBg;
+    }
+    else if (vis.hover || (dis->itemState & ODS_FOCUS))
+    {
+        if (!primary)
+            bg = theme::BtnHover;
+    }
+
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    int dpi = DpiForHwnd(dis->hwndItem);
+    int radius = MulDiv(12, dpi, 96);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(dc, GetThemeBrush(bg));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+
+    wchar_t text[128] = {};
+    GetWindowTextW(dis->hwndItem, text, ARRAYSIZE(text));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, fg);
+    if (g_fontNav)
+        SelectObject(dc, g_fontNav);
+    DrawTextW(dc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void DrawOwnerCheckbox(const DRAWITEMSTRUCT* dis, bool checked)
+{
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    int dpi = DpiForHwnd(dis->hwndItem);
+    int box = MulDiv(14, dpi, 96);
+    int y = rc.top + ((rc.bottom - rc.top) - box) / 2;
+    RECT boxRc = { rc.left, y, rc.left + box, y + box };
+
+    HPEN pen = CreatePen(PS_SOLID, 1, checked ? theme::Accent : theme::BtnBorder);
+    HGDIOBJ oldBrush = SelectObject(dc, GetThemeBrush(checked ? theme::Accent : theme::WindowBg));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    int radius = MulDiv(4, dpi, 96);
+    RoundRect(dc, boxRc.left, boxRc.top, boxRc.right, boxRc.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+
+    if (checked)
+    {
+        HPEN checkPen = CreatePen(PS_SOLID, MulDiv(2, dpi, 96), theme::AccentText);
+        HGDIOBJ old = SelectObject(dc, checkPen);
+        int l = boxRc.left, t = boxRc.top;
+        POINT mid = { l + MulDiv(6, dpi, 96), t + MulDiv(11, dpi, 96) };
+        POINT end = { l + MulDiv(11, dpi, 96), t + MulDiv(4, dpi, 96) };
+        MoveToEx(dc, l + MulDiv(3, dpi, 96), t + MulDiv(8, dpi, 96), nullptr);
+        PolylineTo(dc, &mid, 1);
+        PolylineTo(dc, &end, 1);
+        SelectObject(dc, old);
+        DeleteObject(checkPen);
+    }
+
+    wchar_t text[128] = {};
+    GetWindowTextW(dis->hwndItem, text, ARRAYSIZE(text));
+    RECT trc = { boxRc.right + MulDiv(8, dpi, 96), rc.top, rc.right, rc.bottom };
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, checked ? theme::TextPrimary : theme::TextMuted);
+    if (g_fontNav)
+        SelectObject(dc, g_fontNav);
+    DrawTextW(dc, text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void DrawNavItem(const DRAWITEMSTRUCT* dis)
+{
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    int dpi = DpiForHwnd(dis->hwndItem);
+
+    FillRect(dc, &rc, GetThemeBrush(selected ? theme::NavActiveBg : theme::WindowBg));
+    if (selected)
+    {
+        int bar = MulDiv(3, dpi, 96);
+        RECT barRc = { rc.left, rc.top + MulDiv(8, dpi, 96), rc.left + bar, rc.bottom - MulDiv(8, dpi, 96) };
+        FillRect(dc, &barRc, GetThemeBrush(theme::Accent));
+    }
+
+    wchar_t text[64] = {};
+    SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)text);
+    int dot = MulDiv(6, dpi, 96);
+    int cx = rc.left + MulDiv(16, dpi, 96);
+    int cy = (rc.top + rc.bottom) / 2;
+    HGDIOBJ old = SelectObject(dc, GetThemeBrush(selected ? theme::Accent : theme::TextMuted));
+    Ellipse(dc, cx - dot / 2, cy - dot / 2, cx + dot / 2, cy + dot / 2);
+    SelectObject(dc, old);
+
+    RECT trc = { cx + MulDiv(10, dpi, 96), rc.top, rc.right, rc.bottom };
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, selected ? theme::Accent : theme::TextMuted);
+    if (g_fontNav)
+        SelectObject(dc, g_fontNav);
+    DrawTextW(dc, text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void DrawTwoLineItem(const DRAWITEMSTRUCT* dis, const std::wstring& title,
+                            const std::wstring& subtitle, bool showBadge)
+{
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    int dpi = DpiForHwnd(dis->hwndItem);
+
+    FillRect(dc, &rc, GetThemeBrush(selected ? theme::SelectedBg : theme::PanelBg));
+    if (selected)
+    {
+        int bar = MulDiv(3, dpi, 96);
+        RECT barRc = { rc.left, rc.top, rc.left + bar, rc.bottom };
+        FillRect(dc, &barRc, GetThemeBrush(theme::Accent));
+    }
+
+    int pad = MulDiv(14, dpi, 96);
+    int lineH = MulDiv(20, dpi, 96);
+    int top = rc.top + MulDiv(4, dpi, 96);
+    SetBkMode(dc, TRANSPARENT);
+
+    if (g_fontItemTitle)
+        SelectObject(dc, g_fontItemTitle);
+    SetTextColor(dc, theme::TextPrimary);
+    RECT trc = { rc.left + pad, top, rc.right - pad, top + lineH };
+    DrawTextW(dc, title.c_str(), -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (showBadge)
+    {
+        if (g_fontItemPath)
+            SelectObject(dc, g_fontItemPath);
+        SetTextColor(dc, theme::Accent);
+        RECT brc = { rc.right - MulDiv(90, dpi, 96), top, rc.right - MulDiv(8, dpi, 96), top + lineH };
+        DrawTextW(dc, L"DEFAULT", -1, &brc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    if (g_fontItemPath)
+        SelectObject(dc, g_fontItemPath);
+    SetTextColor(dc, theme::TextMuted);
+    RECT src = { rc.left + pad, top + lineH, rc.right - MulDiv(8, dpi, 96), rc.bottom - MulDiv(3, dpi, 96) };
+    DrawTextW(dc, subtitle.c_str(), -1, &src, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+}
+
+static BOOL HandleMeasureItem(HWND hDlg, LPARAM lParam)
+{
+    auto mis = (MEASUREITEMSTRUCT*)lParam;
+    if (mis->CtlID == IDC_NAV_LIST)
+        mis->itemHeight = MulDiv(34, DpiForHwnd(hDlg), 96);
+    else
+        mis->itemHeight = MulDiv(46, DpiForHwnd(hDlg), 96);
+    return TRUE;
 }
 
 static void ShowHelp(HWND hWnd)
@@ -138,6 +458,9 @@ INT_PTR CALLBACK SelectorDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPAR
 
         SetWindowPos(hDlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 
+        ApplyWindowChrome(hDlg);
+        EnsureThemeFonts(hDlg);
+
         g_installs = *(std::vector<VivadoInstall>*)lParam;
         HWND hList = GetDlgItem(hDlg, IDC_VERSION_LIST);
         PopulateList(hList);
@@ -153,6 +476,28 @@ INT_PTR CALLBACK SelectorDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPAR
         SetFocus(hList);
         return (INT_PTR)FALSE;
     }
+
+    case WM_MEASUREITEM:
+        return HandleMeasureItem(hDlg, lParam);
+
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* dis = (const DRAWITEMSTRUCT*)lParam;
+        if (dis->CtlID == IDC_VERSION_LIST)
+        {
+            int i = (int)dis->itemData;
+            if (i >= 0 && i < (int)g_installs.size())
+                DrawTwoLineItem(dis, g_installs[i].version, g_installs[i].path, false);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return DarkDialogColor(message, wParam, lParam);
 
     case WM_COMMAND:
     {
@@ -189,7 +534,29 @@ INT_PTR CALLBACK AddPathDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
     switch (message)
     {
     case WM_INITDIALOG:
+    {
+        ApplyWindowChrome(hDlg);
+        EnsureThemeFonts(hDlg);
+        SubclassOwnerButton(hDlg, IDOK);
+        SubclassOwnerButton(hDlg, IDCANCEL);
+        SubclassOwnerButton(hDlg, IDC_BROWSE_BUTTON);
         return (INT_PTR)TRUE;
+    }
+
+    case WM_MEASUREITEM:
+        return HandleMeasureItem(hDlg, lParam);
+
+    case WM_DRAWITEM:
+    {
+        DrawOwnerButton((const DRAWITEMSTRUCT*)lParam);
+        return TRUE;
+    }
+
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return DarkDialogColor(message, wParam, lParam);
 
     case WM_COMMAND:
     {
@@ -246,6 +613,7 @@ INT_PTR CALLBACK AddPathDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 static std::vector<VivadoInstall> g_mainInstalls;
 static std::vector<RecentProject> g_mainRecent;
 static LaunchSettings g_launchSettings;
+static std::wstring g_mainDefaultPath;
 
 static void CenterMainDialog(HWND hDlg)
 {
@@ -270,44 +638,35 @@ static void CenterMainDialog(HWND hDlg)
     SetWindowPos(hDlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void SetMainTab(HWND hDlg, int topTab, int lowerTab)
+static void ShowMainPage(HWND hDlg, int page)
 {
-    const int openControls[] = {
+    const int projectControls[] = {
         IDC_PROJECT_LABEL, IDC_PROJECT_PATH, IDC_BROWSE_PROJECT,
-        IDC_RECENT_LABEL, IDC_RECENT_PROJECTS, IDC_BIND_PROJECT
-    };
-    const int vivadoControls[] = {
-        IDC_INSTALL_LABEL, IDC_INSTALL_LIST, IDC_REFRESH_INSTALLS,
-        IDC_ADD_INSTALL, IDC_SET_DEFAULT
-    };
-    const int launchControls[] = {
-        IDC_OPTIONS_LABEL, IDC_NO_LOG, IDC_NO_JOURNAL, IDC_ADDITIONAL_LABEL, IDC_EXTRA_ARGS
+        IDC_RECENT_LABEL, IDC_RECENT_PROJECTS, IDC_INSTALL_LABEL, IDC_INSTALL_LIST,
+        IDC_REFRESH_INSTALLS, IDC_ADD_INSTALL, IDC_SET_DEFAULT,
+        IDC_NO_LOG, IDC_NO_JOURNAL, IDC_ADDITIONAL_LABEL, IDC_EXTRA_ARGS,
+        IDC_BIND_PROJECT, IDC_OPEN_PROJECT
     };
     const int diagnosticControls[] = {
-        IDC_REGISTER_XPR, IDC_DIAGNOSTIC_LABEL, IDC_VIEW_LOG,
-        IDC_OPEN_LOG_FOLDER, IDC_CLEAR_RECENT, IDC_OPEN_CONFIG_FOLDER,
-        IDC_LOG_PATH, IDC_CONFIG_PATH, IDC_LOG_LABEL, IDC_CONFIG_LABEL
+        IDC_DIAGNOSTIC_LABEL, IDC_VIEW_LOG, IDC_OPEN_LOG_FOLDER, IDC_CLEAR_RECENT,
+        IDC_OPEN_CONFIG_FOLDER, IDC_REGISTER_XPR, IDC_LOG_LABEL, IDC_LOG_PATH,
+        IDC_CONFIG_LABEL, IDC_CONFIG_PATH
     };
     const int helpControls[] = { IDC_HELP_LABEL, IDC_HELP_TEXT };
 
-    for (int id : openControls) ShowWindow(GetDlgItem(hDlg, id), topTab == 0 ? SW_SHOW : SW_HIDE);
-    for (int id : diagnosticControls) ShowWindow(GetDlgItem(hDlg, id), topTab == 1 ? SW_SHOW : SW_HIDE);
-    for (int id : helpControls) ShowWindow(GetDlgItem(hDlg, id), topTab == 2 ? SW_SHOW : SW_HIDE);
-    for (int id : vivadoControls) ShowWindow(GetDlgItem(hDlg, id), lowerTab == 0 ? SW_SHOW : SW_HIDE);
-    for (int id : launchControls) ShowWindow(GetDlgItem(hDlg, id), lowerTab == 1 ? SW_SHOW : SW_HIDE);
-    ShowWindow(GetDlgItem(hDlg, IDC_OPEN_PROJECT), topTab == 0 ? SW_SHOW : SW_HIDE);
+    for (int id : projectControls) ShowWindow(GetDlgItem(hDlg, id), page == 0 ? SW_SHOW : SW_HIDE);
+    for (int id : diagnosticControls) ShowWindow(GetDlgItem(hDlg, id), page == 1 ? SW_SHOW : SW_HIDE);
+    for (int id : helpControls) ShowWindow(GetDlgItem(hDlg, id), page == 2 ? SW_SHOW : SW_HIDE);
 }
 
 static void PopulateMainInstallList(HWND hDlg)
 {
     HWND hList = GetDlgItem(hDlg, IDC_INSTALL_LIST);
     SendMessageW(hList, LB_RESETCONTENT, 0, 0);
-    std::wstring defaultPath = LoadDefaultInstallPath();
+    g_mainDefaultPath = LoadDefaultInstallPath();
     wchar_t projectPath[32768] = {};
     GetWindowTextW(GetDlgItem(hDlg, IDC_PROJECT_PATH), projectPath, ARRAYSIZE(projectPath));
     std::wstring boundPath = LoadProjectInstallPath(projectPath);
-    if (!boundPath.empty())
-        defaultPath = boundPath;
     int defaultIndex = -1;
 
     for (size_t i = 0; i < g_mainInstalls.size(); ++i)
@@ -316,14 +675,26 @@ static void PopulateMainInstallList(HWND hDlg)
         std::wstring text = install.version + L"    " + install.path;
         int item = (int)SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)text.c_str());
         SendMessageW(hList, LB_SETITEMDATA, item, (LPARAM)i);
-        if (SamePath(install.path, defaultPath))
+        if (!boundPath.empty() && SamePath(install.path, boundPath))
             defaultIndex = item;
     }
 
     if (defaultIndex >= 0)
         SendMessageW(hList, LB_SETCURSEL, defaultIndex, 0);
-    else if (!g_mainInstalls.empty())
-        SendMessageW(hList, LB_SETCURSEL, 0, 0);
+    else
+    {
+        // No project binding: preselect the default installation.
+        for (size_t i = 0; i < g_mainInstalls.size(); ++i)
+        {
+            if (SamePath(g_mainInstalls[i].path, g_mainDefaultPath))
+            {
+                SendMessageW(hList, LB_SETCURSEL, (WPARAM)i, 0);
+                break;
+            }
+        }
+        if ((int)SendMessageW(hList, LB_GETCURSEL, 0, 0) < 0 && !g_mainInstalls.empty())
+            SendMessageW(hList, LB_SETCURSEL, 0, 0);
+    }
 }
 
 static void PopulateRecentList(HWND hDlg)
@@ -402,8 +773,6 @@ static bool OpenMainProject(HWND hDlg)
             return false;
     }
     RememberRecentProject(projectPath, install.version);
-    g_launchSettings.noLog = IsDlgButtonChecked(hDlg, IDC_NO_LOG) == BST_CHECKED;
-    g_launchSettings.noJournal = IsDlgButtonChecked(hDlg, IDC_NO_JOURNAL) == BST_CHECKED;
     wchar_t extraArgs[32768] = {};
     GetWindowTextW(GetDlgItem(hDlg, IDC_EXTRA_ARGS), extraArgs, ARRAYSIZE(extraArgs));
     g_launchSettings.extraArgs = extraArgs;
@@ -425,46 +794,35 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
     case WM_INITDIALOG:
     {
         CenterMainDialog(hDlg);
-        HWND hTabs = GetDlgItem(hDlg, IDC_MAIN_TABS);
-        TCITEMW tab = {};
-        tab.mask = TCIF_TEXT;
-        const wchar_t* tabNames[] = { L"Projects", L"Diagnosis", L"Help" };
-        for (const wchar_t* name : tabNames)
+        ApplyWindowChrome(hDlg);
+        EnsureThemeFonts(hDlg);
+        for (int id : { IDC_BROWSE_PROJECT, IDC_REFRESH_INSTALLS, IDC_ADD_INSTALL,
+                        IDC_SET_DEFAULT, IDC_BIND_PROJECT, IDC_OPEN_PROJECT, IDCANCEL,
+                        IDC_VIEW_LOG, IDC_OPEN_LOG_FOLDER, IDC_CLEAR_RECENT,
+                        IDC_OPEN_CONFIG_FOLDER, IDC_REGISTER_XPR })
         {
-            tab.pszText = const_cast<wchar_t*>(name);
-            TabCtrl_InsertItem(hTabs, TabCtrl_GetItemCount(hTabs), &tab);
+            SubclassOwnerButton(hDlg, id);
         }
-        TabCtrl_SetCurSel(hTabs, 0);
-        HWND hLowerTabs = GetDlgItem(hDlg, IDC_LOWER_TABS);
-        const wchar_t* lowerTabNames[] = { L"Vivado", L"Launch" };
-        for (const wchar_t* name : lowerTabNames)
-        {
-            tab.pszText = const_cast<wchar_t*>(name);
-            TabCtrl_InsertItem(hLowerTabs, TabCtrl_GetItemCount(hLowerTabs), &tab);
-        }
-        TabCtrl_SetCurSel(hLowerTabs, 0);
+        HWND hNav = GetDlgItem(hDlg, IDC_NAV_LIST);
+        for (const wchar_t* name : { L"Projects", L"Diagnosis", L"Help" })
+            SendMessageW(hNav, LB_ADDSTRING, 0, (LPARAM)name);
+        SendMessageW(hNav, LB_SETCURSEL, 0, 0);
         const wchar_t* initialPath = (const wchar_t*)lParam;
         if (initialPath && *initialPath)
             SetProjectPath(hDlg, initialPath);
         g_mainInstalls = DetectVivadoInstallations();
         g_launchSettings = LoadLaunchSettings();
-        CheckDlgButton(hDlg, IDC_NO_LOG, g_launchSettings.noLog ? BST_CHECKED : BST_UNCHECKED);
-        CheckDlgButton(hDlg, IDC_NO_JOURNAL, g_launchSettings.noJournal ? BST_CHECKED : BST_UNCHECKED);
         SetWindowTextW(GetDlgItem(hDlg, IDC_EXTRA_ARGS), g_launchSettings.extraArgs.c_str());
         SetWindowTextW(GetDlgItem(hDlg, IDC_LOG_PATH), GetLogFilePath().c_str());
         SetWindowTextW(GetDlgItem(hDlg, IDC_CONFIG_PATH), GetSettingsFilePath().c_str());
         SetWindowTextW(GetDlgItem(hDlg, IDC_HELP_TEXT),
                        L"vivlauncher help\r\n\r\n"
                        L"Projects\r\n"
-                       L"Select an .xpr file or choose one from Recent projects.\r\n"
-                       L"Select a Vivado installation in the lower Vivado tab, then click Open project.\r\n"
-                       L"Bind project stores the selected version for this project only.\r\n"
-                       L"Double-click a recent project to open it immediately.\r\n\r\n"
-                       L"Vivado\r\n"
-                       L"The launcher scans standard Xilinx and AMDDesignTools locations.\r\n"
-                       L"Use Add path for a custom Vivado root or its bin folder.\r\n"
-                       L"Set default selects the version used when no project binding exists.\r\n\r\n"
-                       L"Launch\r\n"
+                       L"Pick an .xpr file or double-click one under Recent projects.\r\n"
+                       L"Select a Vivado installation on the right, then click Open project.\r\n"
+                       L"Bind project stores the selected installation for this project only.\r\n"
+                       L"Set default chooses the fallback installation for new projects.\r\n\r\n"
+                       L"Launch options\r\n"
                        L"No log and No journal add -nolog and -nojournal.\r\n"
                        L"Additional arguments are appended to the Vivado command line.\r\n"
                        L"Settings are saved under the vivlauncher AppData folder.\r\n\r\n"
@@ -477,28 +835,75 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                        L"vivlauncher.exe --add C:\\Vivado\\2025.2\\Vivado");
         PopulateMainInstallList(hDlg);
         PopulateRecentList(hDlg);
-        SetMainTab(hDlg, 0, 0);
+        ShowMainPage(hDlg, 0);
         return TRUE;
     }
-    case WM_NOTIFY:
-        if (((LPNMHDR)lParam)->idFrom == IDC_MAIN_TABS &&
-            ((LPNMHDR)lParam)->code == TCN_SELCHANGE)
+    case WM_MEASUREITEM:
+        return HandleMeasureItem(hDlg, lParam);
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* dis = (const DRAWITEMSTRUCT*)lParam;
+        switch (dis->CtlID)
         {
-            SetMainTab(hDlg, TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_MAIN_TABS)),
-                       TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_LOWER_TABS)));
+        case IDC_NAV_LIST:
+            DrawNavItem(dis);
+            return TRUE;
+        case IDC_RECENT_PROJECTS:
+        {
+            int i = (int)dis->itemData;
+            if (i >= 0 && i < (int)g_mainRecent.size())
+            {
+                fs::path projectPath(g_mainRecent[i].path);
+                DrawTwoLineItem(dis, projectPath.filename().native(), g_mainRecent[i].path, false);
+            }
             return TRUE;
         }
-        if (((LPNMHDR)lParam)->idFrom == IDC_LOWER_TABS &&
-            ((LPNMHDR)lParam)->code == TCN_SELCHANGE)
+        case IDC_INSTALL_LIST:
         {
-            SetMainTab(hDlg, TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_MAIN_TABS)),
-                       TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_LOWER_TABS)));
+            int i = (int)dis->itemData;
+            if (i >= 0 && i < (int)g_mainInstalls.size())
+            {
+                bool isDefault = SamePath(g_mainInstalls[i].path, g_mainDefaultPath);
+                DrawTwoLineItem(dis, g_mainInstalls[i].version, g_mainInstalls[i].path, isDefault);
+            }
             return TRUE;
         }
-        break;
+        case IDC_NO_LOG:
+            DrawOwnerCheckbox(dis, g_launchSettings.noLog);
+            return TRUE;
+        case IDC_NO_JOURNAL:
+            DrawOwnerCheckbox(dis, g_launchSettings.noJournal);
+            return TRUE;
+        default:
+            DrawOwnerButton(dis);
+            return TRUE;
+        }
+    }
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return DarkDialogColor(message, wParam, lParam);
+    case WM_DESTROY:
+        DestroyThemeFonts();
+        return FALSE;
     case WM_COMMAND:
     {
         int id = LOWORD(wParam);
+        if (id == IDC_NAV_LIST && HIWORD(wParam) == LBN_SELCHANGE)
+        {
+            ShowMainPage(hDlg, (int)SendMessageW((HWND)lParam, LB_GETCURSEL, 0, 0));
+            return TRUE;
+        }
+        if ((id == IDC_NO_LOG || id == IDC_NO_JOURNAL) && HIWORD(wParam) == BN_CLICKED)
+        {
+            if (id == IDC_NO_LOG)
+                g_launchSettings.noLog = !g_launchSettings.noLog;
+            else
+                g_launchSettings.noJournal = !g_launchSettings.noJournal;
+            InvalidateRect((HWND)lParam, nullptr, TRUE);
+            return TRUE;
+        }
         if (id == IDC_BROWSE_PROJECT)
         {
             OPENFILENAMEW ofn = {};
