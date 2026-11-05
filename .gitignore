@@ -1,6 +1,6 @@
-# Build output
-vivlauncher/x64/
-vivlauncher/.vs/
+# Build output (matches any nesting depth: vivlauncher/x64, vivlauncher/vivlauncher/x64, tests/x64, ...)
+x64/
+.vs/
 
 # OS
 .DS_Store

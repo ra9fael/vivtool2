@@ -1,23 +1,43 @@
-# build.ps1 - Script to build vivlauncher using Visual Studio environment
+# build.ps1 - Build vivlauncher (and run the logic tests) with any VS edition.
 
-$vsPath = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
-$projectFile = "vivlauncher.vcxproj"
-$configuration = "Release"
-$platform = "x64"
+param(
+    [string]$Configuration = "Release",
+    [string]$Platform = "x64",
+    [switch]$Tests
+)
 
-if ($args.Count -ge 1) { $configuration = $args[0] }
+$ErrorActionPreference = "Stop"
 
-Write-Host "Building $projectFile [$configuration|$platform]..." -ForegroundColor Cyan
-
-# Use cmd.exe to set up the environment and run msbuild
-$cmd = "call `"$vsPath`" && msbuild `"$projectFile`" /p:Configuration=$configuration /p:Platform=$platform"
-
-cmd.exe /c $cmd
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nBuild Successful!" -ForegroundColor Green
-} else {
-    Write-Host "`nBuild Failed with exit code $LASTEXITCODE" -ForegroundColor Red
+# Locate the newest Visual Studio installation via vswhere; works for
+# Community / Professional / Enterprise / Build Tools regardless of install path.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path $vswhere)) {
+    throw "vswhere.exe not found. Install Visual Studio or Build Tools for Visual Studio."
 }
 
-exit $LASTEXITCODE
+$msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+    -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+if (-not $msbuild) {
+    throw "No Visual Studio installation with MSBuild was found."
+}
+
+$solution = Join-Path $PSScriptRoot "vivlauncher.slnx"
+Write-Host "Building $solution [$Configuration|$Platform] via $msbuild" -ForegroundColor Cyan
+
+& $msbuild $solution "/p:Configuration=$Configuration" "/p:Platform=$Platform" /m /v:m /nologo
+$exitCode = $LASTEXITCODE
+
+if ($Tests -and $exitCode -eq 0) {
+    $testExe = Join-Path $PSScriptRoot "..\tests\x64\$Configuration\vivlauncher_tests.exe"
+    Write-Host "`nRunning logic tests..." -ForegroundColor Cyan
+    & $testExe
+    $exitCode = $LASTEXITCODE
+}
+
+if ($exitCode -eq 0) {
+    Write-Host "`nBuild successful!" -ForegroundColor Green
+} else {
+    Write-Host "`nBuild failed with exit code $exitCode" -ForegroundColor Red
+}
+
+exit $exitCode
