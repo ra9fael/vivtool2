@@ -78,6 +78,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&commonControls);
 
+    // Crisp rendering on any monitor scale; must be set before any window is created.
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     CliOptions opts = ParseCliArgs(argc, argv);
