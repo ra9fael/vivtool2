@@ -1,4 +1,5 @@
 #include "VivadoDetector.h"
+#include "VivadoLogic.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -258,31 +259,13 @@ static void AddFromPath(const fs::path& basePath, std::vector<VivadoInstall>& in
 
 static bool CompareVersions(const VivadoInstall& a, const VivadoInstall& b)
 {
-    auto parseVersion = [](const std::wstring& v) -> std::tuple<int, int>
-    {
-        int major = 0, minor = 0;
-        if (v == L"Unknown") return {0, 0};
-        swscanf_s(v.c_str(), L"%d.%d", &major, &minor);
-        return {major, minor};
-    };
-
-    auto [amaj, amin] = parseVersion(a.version);
-    auto [bmaj, bmin] = parseVersion(b.version);
-
-    if (amaj != bmaj) return amaj > bmaj;
-    if (amin != bmin) return amin > bmin;
-    // Stable secondary order so equal versions keep a deterministic position.
-    return _wcsicmp(a.path.c_str(), b.path.c_str()) < 0;
+    return vivlogic::CompareInstallVersions(a, b);
 }
 
 // Case-insensitive, fully-resolved path identity used for dedup and binding.
 static std::wstring PathKey(const std::wstring& path)
 {
-    std::wstring key = GetAbsolutePath(path);
-    while (!key.empty() && (key.back() == L'\\' || key.back() == L'/'))
-        key.pop_back();
-    std::transform(key.begin(), key.end(), key.begin(), towlower);
-    return key;
+    return vivlogic::NormalizePathKey(GetAbsolutePath(path));
 }
 
 static void Deduplicate(std::vector<VivadoInstall>& installs)

@@ -4,4 +4,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="vivlauncher.vcxproj" Id="f6a431e2-39d6-4d94-aed5-14de2a419b7d" />
+  <Project Path="..\tests\vivlauncher_tests.vcxproj" Id="4d19e50a-2b13-4d7e-8a44-6e5a90c3f2e8" />
 </Solution>

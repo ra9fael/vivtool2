@@ -132,6 +132,7 @@
     <ClInclude Include="targetver.h" />
     <ClInclude Include="theme.h" />
     <ClInclude Include="VivadoDetector.h" />
+    <ClInclude Include="VivadoLogic.h" />
     <ClInclude Include="SelectorDialog.h" />
     <ClInclude Include="vivlauncher.h" />
   </ItemGroup>
