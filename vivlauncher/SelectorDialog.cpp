@@ -47,6 +47,8 @@ static HBRUSH GetThemeBrush(COLORREF color)
 static HFONT g_fontItemTitle = nullptr; // list item primary line
 static HFONT g_fontItemPath = nullptr;  // list item secondary line
 static HFONT g_fontNav = nullptr;       // sidebar entries and buttons
+static HFONT g_fontSection = nullptr;   // help page section headers
+static HFONT g_fontMono = nullptr;      // monospaced paths and commands
 
 struct ButtonVisual
 {
@@ -78,6 +80,12 @@ static void EnsureThemeFonts(HWND hWnd)
     g_fontNav = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_fontSection = CreateFontW(-MulDiv(8, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_fontMono = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
 }
 
 static void DestroyThemeFonts()
@@ -85,6 +93,8 @@ static void DestroyThemeFonts()
     if (g_fontItemTitle) { DeleteObject(g_fontItemTitle); g_fontItemTitle = nullptr; }
     if (g_fontItemPath) { DeleteObject(g_fontItemPath); g_fontItemPath = nullptr; }
     if (g_fontNav) { DeleteObject(g_fontNav); g_fontNav = nullptr; }
+    if (g_fontSection) { DeleteObject(g_fontSection); g_fontSection = nullptr; }
+    if (g_fontMono) { DeleteObject(g_fontMono); g_fontMono = nullptr; }
 }
 
 static void ApplyWindowChrome(HWND hDlg)
@@ -147,7 +157,7 @@ static LRESULT DarkDialogColor(UINT message, WPARAM wParam, LPARAM lParam)
 static void PaintEditBorders(HWND hDlg, HDC dc)
 {
     for (int id : { IDC_PROJECT_PATH, IDC_EXTRA_ARGS, IDC_LOG_PATH,
-                    IDC_CONFIG_PATH, IDC_HELP_TEXT, IDC_PATH_EDIT })
+                    IDC_CONFIG_PATH, IDC_PATH_EDIT })
     {
         HWND h = GetDlgItem(hDlg, id);
         if (!h || !IsWindowVisible(h))
@@ -283,14 +293,20 @@ static void DrawOwnerCheckbox(const DRAWITEMSTRUCT* dis, bool checked)
 
     if (checked)
     {
-        HPEN checkPen = CreatePen(PS_SOLID, MulDiv(2, dpi, 96), theme::AccentText);
+        // Symmetric check mark: anchor points are proportional to the box so
+        // the glyph stays balanced at any DPI. A geometric pen with round
+        // caps/joins keeps the joint smooth.
+        LOGBRUSH lb = { BS_SOLID, theme::AccentText, 0 };
+        HPEN checkPen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
+                                     MulDiv(box, 15, 100) + 1, &lb, 0, nullptr);
         HGDIOBJ old = SelectObject(dc, checkPen);
         int l = boxRc.left, t = boxRc.top;
-        POINT mid = { l + MulDiv(6, dpi, 96), t + MulDiv(11, dpi, 96) };
-        POINT end = { l + MulDiv(11, dpi, 96), t + MulDiv(4, dpi, 96) };
-        MoveToEx(dc, l + MulDiv(3, dpi, 96), t + MulDiv(8, dpi, 96), nullptr);
-        PolylineTo(dc, &mid, 1);
-        PolylineTo(dc, &end, 1);
+        POINT pts[3] = {
+            { l + MulDiv(box, 24, 100), t + MulDiv(box, 54, 100) },
+            { l + MulDiv(box, 44, 100), t + MulDiv(box, 71, 100) },
+            { l + MulDiv(box, 76, 100), t + MulDiv(box, 30, 100) },
+        };
+        Polyline(dc, pts, 3);
         SelectObject(dc, old);
         DeleteObject(checkPen);
     }
@@ -380,11 +396,149 @@ static void DrawTwoLineItem(const DRAWITEMSTRUCT* dis, const std::wstring& title
     DrawTextW(dc, subtitle.c_str(), -1, &src, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
 }
 
+// ---------------------------------------------------------------------------
+// Help page: documentation rendered as an owner-drawn list with section
+// headers, body paragraphs, bullets and monospaced command pills.
+// ---------------------------------------------------------------------------
+
+enum HelpRowType { HelpSection, HelpBody, HelpBullet, HelpCode };
+struct HelpRow { HelpRowType type; const wchar_t* text; };
+
+static const std::vector<HelpRow>& HelpRows()
+{
+    static const std::vector<HelpRow> rows = {
+        { HelpSection, L"PROJECTS" },
+        { HelpBody,    L"Pick an .xpr file, or double-click one under Recent projects. Select a Vivado installation on the right, then click Open project." },
+        { HelpBullet,  L"Bind project stores the selected installation for this project only" },
+        { HelpBullet,  L"Set default chooses the fallback installation for new projects" },
+        { HelpSection, L"LAUNCH OPTIONS" },
+        { HelpBullet,  L"No log and No journal append -nolog and -nojournal" },
+        { HelpBullet,  L"Additional arguments are appended to the Vivado command line" },
+        { HelpBullet,  L"Settings are saved under the vivlauncher AppData folder" },
+        { HelpSection, L"DIAGNOSIS" },
+        { HelpBullet,  L"View log opens the latest launch record with paths, arguments, result and error code" },
+        { HelpSection, L"COMMAND LINE" },
+        { HelpCode,    L"vivlauncher.exe project.xpr" },
+        { HelpCode,    L"vivlauncher.exe --list" },
+        { HelpCode,    L"vivlauncher.exe --add C:\\Vivado\\2025.2\\Vivado" },
+    };
+    return rows;
+}
+
+static void PopulateHelpList(HWND hDlg)
+{
+    HWND hList = GetDlgItem(hDlg, IDC_HELP_LIST);
+    SendMessageW(hList, LB_RESETCONTENT, 0, 0);
+    const auto& rows = HelpRows();
+    for (size_t i = 0; i < rows.size(); ++i)
+        SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)i);
+}
+
+static void MeasureHelpRow(HWND hDlg, int index, UINT& height)
+{
+    int dpi = DpiForHwnd(hDlg);
+    const auto& rows = HelpRows();
+    if (index < 0 || index >= (int)rows.size())
+    {
+        height = MulDiv(20, dpi, 96);
+        return;
+    }
+    const HelpRow& row = rows[index];
+    HDC dc = GetDC(hDlg);
+    int h;
+    if (row.type == HelpSection)
+    {
+        SelectObject(dc, g_fontSection);
+        h = MulDiv(34, dpi, 96);
+    }
+    else if (row.type == HelpCode)
+    {
+        SelectObject(dc, g_fontMono);
+        h = MulDiv(30, dpi, 96);
+    }
+    else
+    {
+        SelectObject(dc, g_fontNav);
+        RECT rc = {};
+        GetClientRect(GetDlgItem(hDlg, IDC_HELP_LIST), &rc);
+        int leftPad = row.type == HelpBullet ? MulDiv(18, dpi, 96) : MulDiv(2, dpi, 96);
+        RECT calc = { 0, 0, rc.right - leftPad - MulDiv(14, dpi, 96), 0 };
+        DrawTextW(dc, row.text, -1, &calc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+        h = calc.bottom - calc.top + MulDiv(8, dpi, 96);
+    }
+    ReleaseDC(hDlg, dc);
+    height = h;
+}
+
+static void DrawHelpItem(const DRAWITEMSTRUCT* dis)
+{
+    const auto& rows = HelpRows();
+    if (dis->itemID >= rows.size())
+        return;
+    const HelpRow& row = rows[dis->itemID];
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    int dpi = DpiForHwnd(dis->hwndItem);
+    FillRect(dc, &rc, GetThemeBrush(theme::PanelBg));
+    SetBkMode(dc, TRANSPARENT);
+
+    switch (row.type)
+    {
+    case HelpSection:
+        SelectObject(dc, g_fontSection);
+        SetTextColor(dc, theme::Accent);
+        rc.top += MulDiv(14, dpi, 96);
+        DrawTextW(dc, row.text, -1, &rc, DT_LEFT | DT_SINGLELINE);
+        break;
+    case HelpBody:
+        SelectObject(dc, g_fontNav);
+        SetTextColor(dc, theme::TextPrimary);
+        DrawTextW(dc, row.text, -1, &rc, DT_LEFT | DT_WORDBREAK);
+        break;
+    case HelpBullet:
+    {
+        int dot = MulDiv(4, dpi, 96);
+        int cx = rc.left + MulDiv(8, dpi, 96);
+        int cy = rc.top + MulDiv(12, dpi, 96);
+        HGDIOBJ old = SelectObject(dc, GetThemeBrush(theme::Accent));
+        Ellipse(dc, cx - dot / 2, cy - dot / 2, cx + dot / 2, cy + dot / 2);
+        SelectObject(dc, old);
+        SelectObject(dc, g_fontNav);
+        SetTextColor(dc, theme::TextPrimary);
+        RECT trc = { rc.left + MulDiv(18, dpi, 96), rc.top, rc.right, rc.bottom };
+        DrawTextW(dc, row.text, -1, &trc, DT_LEFT | DT_WORDBREAK);
+        break;
+    }
+    case HelpCode:
+    {
+        SelectObject(dc, g_fontMono);
+        SetTextColor(dc, theme::Accent);
+        SIZE sz = {};
+        GetTextExtentPoint32W(dc, row.text, (int)wcslen(row.text), &sz);
+        int padX = MulDiv(8, dpi, 96);
+        RECT codeRc = {
+            rc.left + MulDiv(4, dpi, 96), rc.top + MulDiv(4, dpi, 96),
+            min(rc.right - MulDiv(8, dpi, 96),
+                rc.left + MulDiv(4, dpi, 96) + sz.cx + padX * 2),
+            rc.bottom - MulDiv(4, dpi, 96),
+        };
+        FillRect(dc, &codeRc, GetThemeBrush(theme::WindowBg));
+        FrameRect(dc, &codeRc, GetThemeBrush(theme::PanelBorder));
+        RECT trc = codeRc;
+        InflateRect(&trc, -padX, 0);
+        DrawTextW(dc, row.text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        break;
+    }
+    }
+}
+
 static BOOL HandleMeasureItem(HWND hDlg, LPARAM lParam)
 {
     auto mis = (MEASUREITEMSTRUCT*)lParam;
     if (mis->CtlID == IDC_NAV_LIST)
         mis->itemHeight = MulDiv(34, DpiForHwnd(hDlg), 96);
+    else if (mis->CtlID == IDC_HELP_LIST)
+        MeasureHelpRow(hDlg, (int)mis->itemID, mis->itemHeight);
     else
         mis->itemHeight = MulDiv(46, DpiForHwnd(hDlg), 96);
     return TRUE;
@@ -707,7 +861,7 @@ static void ShowMainPage(HWND hDlg, int page)
         IDC_OPEN_CONFIG_FOLDER, IDC_REGISTER_XPR, IDC_LOG_LABEL, IDC_LOG_PATH,
         IDC_CONFIG_LABEL, IDC_CONFIG_PATH
     };
-    const int helpControls[] = { IDC_HELP_LABEL, IDC_HELP_TEXT };
+    const int helpControls[] = { IDC_HELP_LABEL, IDC_HELP_LIST };
 
     for (int id : projectControls) ShowWindow(GetDlgItem(hDlg, id), page == 0 ? SW_SHOW : SW_HIDE);
     for (int id : diagnosticControls) ShowWindow(GetDlgItem(hDlg, id), page == 1 ? SW_SHOW : SW_HIDE);
@@ -873,24 +1027,9 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         SetWindowTextW(GetDlgItem(hDlg, IDC_EXTRA_ARGS), g_launchSettings.extraArgs.c_str());
         SetWindowTextW(GetDlgItem(hDlg, IDC_LOG_PATH), GetLogFilePath().c_str());
         SetWindowTextW(GetDlgItem(hDlg, IDC_CONFIG_PATH), GetSettingsFilePath().c_str());
-        SetWindowTextW(GetDlgItem(hDlg, IDC_HELP_TEXT),
-                       L"vivlauncher help\r\n\r\n"
-                       L"Projects\r\n"
-                       L"Pick an .xpr file or double-click one under Recent projects.\r\n"
-                       L"Select a Vivado installation on the right, then click Open project.\r\n"
-                       L"Bind project stores the selected installation for this project only.\r\n"
-                       L"Set default chooses the fallback installation for new projects.\r\n\r\n"
-                       L"Launch options\r\n"
-                       L"No log and No journal add -nolog and -nojournal.\r\n"
-                       L"Additional arguments are appended to the Vivado command line.\r\n"
-                       L"Settings are saved under the vivlauncher AppData folder.\r\n\r\n"
-                       L"Diagnosis\r\n"
-                       L"View log opens the latest launch record. The log includes paths, arguments,\r\n"
-                       L"working directory, result, and Windows error code when startup fails.\r\n\r\n"
-                       L"Command line\r\n"
-                       L"vivlauncher.exe project.xpr\r\n"
-                       L"vivlauncher.exe --list\r\n"
-                       L"vivlauncher.exe --add C:\\Vivado\\2025.2\\Vivado");
+        SendMessageW(GetDlgItem(hDlg, IDC_LOG_PATH), WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+        SendMessageW(GetDlgItem(hDlg, IDC_CONFIG_PATH), WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+        PopulateHelpList(hDlg);
         PopulateMainInstallList(hDlg);
         PopulateRecentList(hDlg);
         ShowMainPage(hDlg, 0);
@@ -905,6 +1044,9 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         {
         case IDC_NAV_LIST:
             DrawNavItem(dis);
+            return TRUE;
+        case IDC_HELP_LIST:
+            DrawHelpItem(dis);
             return TRUE;
         case IDC_RECENT_PROJECTS:
         {
