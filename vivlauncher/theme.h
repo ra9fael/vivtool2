@@ -22,7 +22,7 @@ namespace theme
 
     // Text
     constexpr COLORREF TextPrimary= FromRgb(232, 234, 237); // #e8eaed
-    constexpr COLORREF TextMuted  = FromRgb(138, 144, 152); // #8a9098
+    constexpr COLORREF TextMuted  = FromRgb(154, 163, 173); // #9aa3ad
 
     // Accent
     constexpr COLORREF Accent     = FromRgb(76, 195, 138);  // #4cc38a
@@ -33,4 +33,6 @@ namespace theme
     constexpr COLORREF BtnBg      = FromRgb(46, 49, 55);    // #2e3137
     constexpr COLORREF BtnBorder  = FromRgb(61, 66, 74);    // #3d424a
     constexpr COLORREF BtnHover   = FromRgb(56, 60, 67);
+    constexpr COLORREF EditBg     = FromRgb(42, 45, 51);    // #2a2d33 edit field surface
+    constexpr COLORREF EditBorder = FromRgb(74, 80, 90);    // #4a505a edit field frame
 }

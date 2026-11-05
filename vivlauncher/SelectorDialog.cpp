@@ -117,17 +117,47 @@ static LRESULT DarkDialogColor(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CTLCOLORDLG:
         return (LRESULT)GetThemeBrush(theme::WindowBg);
     case WM_CTLCOLORSTATIC:
+    {
+        // Read-only edit controls report as CTLCOLORSTATIC, not CTLCOLOREDIT;
+        // they must keep the edit surface color, not the plain dialog one.
+        wchar_t cls[32] = {};
+        GetClassNameW((HWND)lParam, cls, ARRAYSIZE(cls));
+        if (lstrcmpW(cls, L"Edit") == 0)
+        {
+            SetTextColor(dc, theme::TextPrimary);
+            SetBkMode(dc, TRANSPARENT);
+            return (LRESULT)GetThemeBrush(theme::EditBg);
+        }
         SetTextColor(dc, IsSectionLabel(GetDlgCtrlID((HWND)lParam)) ? theme::TextMuted : theme::TextPrimary);
         SetBkMode(dc, TRANSPARENT);
         return (LRESULT)GetThemeBrush(theme::WindowBg);
+    }
     case WM_CTLCOLOREDIT:
         SetTextColor(dc, theme::TextPrimary);
         SetBkMode(dc, TRANSPARENT);
-        return (LRESULT)GetThemeBrush(theme::PanelBg);
+        return (LRESULT)GetThemeBrush(theme::EditBg);
     case WM_CTLCOLORLISTBOX:
         return (LRESULT)GetThemeBrush(theme::PanelBg);
     }
     return 0;
+}
+
+// Draw a 1px frame just outside every visible edit control so input fields
+// read as boxes on the dark background instead of black holes.
+static void PaintEditBorders(HWND hDlg, HDC dc)
+{
+    for (int id : { IDC_PROJECT_PATH, IDC_EXTRA_ARGS, IDC_LOG_PATH,
+                    IDC_CONFIG_PATH, IDC_HELP_TEXT, IDC_PATH_EDIT })
+    {
+        HWND h = GetDlgItem(hDlg, id);
+        if (!h || !IsWindowVisible(h))
+            continue;
+        RECT rc;
+        GetWindowRect(h, &rc);
+        MapWindowPoints(nullptr, hDlg, (POINT*)&rc, 2);
+        InflateRect(&rc, 1, 1);
+        FrameRect(dc, &rc, GetThemeBrush(theme::EditBorder));
+    }
 }
 
 static LRESULT CALLBACK OwnerButtonProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -208,16 +238,18 @@ static void DrawOwnerButton(const DRAWITEMSTRUCT* dis)
 
     HDC dc = dis->hDC;
     RECT rc = dis->rcItem;
-    int dpi = DpiForHwnd(dis->hwndItem);
-    int radius = MulDiv(12, dpi, 96);
 
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = SelectObject(dc, GetThemeBrush(bg));
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
+    // The stock button proc erases the control with a light brush before
+    // sending WM_DRAWITEM, so the full rect must be covered first or white
+    // corners/edges bleed through around the button face.
+    FillRect(dc, &rc, GetThemeBrush(theme::WindowBg));
+
+    // Flat face with a 1px frame: no rounded corners, so no corner artifacts.
+    FillRect(dc, &rc, GetThemeBrush(border));
+    RECT inner = rc;
+    InflateRect(&inner, -1, -1);
+    if (inner.right > inner.left && inner.bottom > inner.top)
+        FillRect(dc, &inner, GetThemeBrush(bg));
 
     wchar_t text[128] = {};
     GetWindowTextW(dis->hwndItem, text, ARRAYSIZE(text));
@@ -232,6 +264,9 @@ static void DrawOwnerCheckbox(const DRAWITEMSTRUCT* dis, bool checked)
 {
     HDC dc = dis->hDC;
     RECT rc = dis->rcItem;
+    // Cover the light background the stock button proc left behind; otherwise
+    // everything outside the small check box shows up as a white bar.
+    FillRect(dc, &rc, GetThemeBrush(theme::WindowBg));
     int dpi = DpiForHwnd(dis->hwndItem);
     int box = MulDiv(14, dpi, 96);
     int y = rc.top + ((rc.bottom - rc.top) - box) / 2;
@@ -555,6 +590,17 @@ INT_PTR CALLBACK AddPathDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
     case WM_MEASUREITEM:
         return HandleMeasureItem(hDlg, lParam);
 
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        if (HDC dc = BeginPaint(hDlg, &ps))
+        {
+            PaintEditBorders(hDlg, dc);
+            EndPaint(hDlg, &ps);
+        }
+        break;
+    }
+
     case WM_DRAWITEM:
     {
         DrawOwnerButton((const DRAWITEMSTRUCT*)lParam);
@@ -666,6 +712,9 @@ static void ShowMainPage(HWND hDlg, int page)
     for (int id : projectControls) ShowWindow(GetDlgItem(hDlg, id), page == 0 ? SW_SHOW : SW_HIDE);
     for (int id : diagnosticControls) ShowWindow(GetDlgItem(hDlg, id), page == 1 ? SW_SHOW : SW_HIDE);
     for (int id : helpControls) ShowWindow(GetDlgItem(hDlg, id), page == 2 ? SW_SHOW : SW_HIDE);
+    // Edit borders are painted by the dialog, so a full repaint is needed
+    // right after the page switch.
+    InvalidateRect(hDlg, nullptr, TRUE);
 }
 
 static void PopulateMainInstallList(HWND hDlg)
@@ -887,6 +936,16 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             DrawOwnerButton(dis);
             return TRUE;
         }
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        if (HDC dc = BeginPaint(hDlg, &ps))
+        {
+            PaintEditBorders(hDlg, dc);
+            EndPaint(hDlg, &ps);
+        }
+        break;
     }
     case WM_CTLCOLORDLG:
     case WM_CTLCOLORSTATIC:
