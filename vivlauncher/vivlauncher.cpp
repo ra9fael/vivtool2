@@ -5,6 +5,7 @@
 #include "VivadoDetector.h"
 #include "SelectorDialog.h"
 #include <commctrl.h>
+#include <io.h>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -88,7 +89,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     if (opts.listVersions || opts.addPath || opts.showHelp)
     {
-        if (AttachConsole(ATTACH_PARENT_PROCESS))
+        // A GUI-subsystem binary has no console by default. Attach to the
+        // parent's console so wprintf output is visible -- but only when
+        // stdout is not already redirected to a file or pipe, otherwise
+        // the freopen below would clobber the redirection.
+        bool redirected = _fileno(stdout) >= 0 && !_isatty(_fileno(stdout));
+        if (!redirected && AttachConsole(ATTACH_PARENT_PROCESS))
         {
             FILE* fp;
             freopen_s(&fp, "CONOUT$", "w", stdout);
