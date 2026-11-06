@@ -1000,6 +1000,68 @@ static void PopulateRecentList(HWND hDlg)
     }
 }
 
+// Full-path tooltip for Recent projects: the list subclass tracks the hovered
+// item and pops the tip when it changes, so the next show re-queries the text
+// through TTN_GETDISPINFOW.
+static HWND g_recentTip = nullptr;
+static int g_recentTipItem = -1;
+
+static LRESULT CALLBACK RecentListSubclass(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                           UINT_PTR, DWORD_PTR)
+{
+    if (message == WM_MOUSEMOVE && g_recentTip)
+    {
+        DWORD hit = (DWORD)SendMessageW(hWnd, LB_ITEMFROMPOINT, 0, lParam);
+        int item = HIWORD(hit) ? -1 : (int)LOWORD(hit);
+        if (item != g_recentTipItem)
+        {
+            g_recentTipItem = item;
+            SendMessageW(g_recentTip, TTM_POP, 0, 0);
+        }
+    }
+    else if (message == WM_NCDESTROY)
+    {
+        RemoveWindowSubclass(hWnd, RecentListSubclass, 1);
+    }
+    return DefSubclassProc(hWnd, message, wParam, lParam);
+}
+
+static void CreateRecentTooltip(HWND hDlg)
+{
+    HWND hList = GetDlgItem(hDlg, IDC_RECENT_PROJECTS);
+    g_recentTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                  WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                  hDlg, nullptr, hInst, nullptr);
+    if (!g_recentTip)
+        return;
+    TTTOOLINFOW ti = { sizeof(ti) };
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = hDlg;
+    ti.uId = (UINT_PTR)hList;
+    ti.lpszText = LPSTR_TEXTCALLBACKW;
+    SendMessageW(g_recentTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    SendMessageW(g_recentTip, TTM_SETMAXTIPWIDTH, 0, MulDiv(640, DpiForHwnd(hDlg), 96));
+    // Installed after the tooltip's own subclass so it runs first and pops the
+    // stale tip before the tooltip sees the mouse move.
+    SetWindowSubclass(hList, RecentListSubclass, 1, 0);
+}
+
+static void FillRecentTooltip(HWND hDlg, NMTTDISPINFOW* di)
+{
+    static std::wstring text;
+    text.clear();
+    if (g_recentTipItem >= 0)
+    {
+        int index = (int)SendMessageW(GetDlgItem(hDlg, IDC_RECENT_PROJECTS), LB_GETITEMDATA,
+                                      g_recentTipItem, 0);
+        if (index >= 0 && index < (int)g_mainRecent.size())
+            text = g_mainRecent[index].path;
+    }
+    di->szText[0] = L'\0';
+    di->lpszText = text.empty() ? di->szText : text.data();
+}
+
 static void SetProjectPath(HWND hDlg, const std::wstring& path)
 {
     SetWindowTextW(GetDlgItem(hDlg, IDC_PROJECT_PATH), path.c_str());
@@ -1111,8 +1173,19 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         PopulateHelpList(hDlg);
         PopulateMainInstallList(hDlg);
         PopulateRecentList(hDlg);
+        CreateRecentTooltip(hDlg);
         ShowMainPage(hDlg, 0);
         return TRUE;
+    }
+    case WM_NOTIFY:
+    {
+        auto hdr = (NMHDR*)lParam;
+        if (hdr->code == TTN_GETDISPINFOW && hdr->hwndFrom == g_recentTip)
+        {
+            FillRecentTooltip(hDlg, (NMTTDISPINFOW*)lParam);
+            return TRUE;
+        }
+        break;
     }
     case WM_MEASUREITEM:
         return HandleMeasureItem(hDlg, lParam);
@@ -1174,6 +1247,9 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
     case WM_CTLCOLORLISTBOX:
         return DarkDialogColor(message, wParam, lParam);
     case WM_DESTROY:
+        // The tooltip is owned by the dialog and destroyed with it.
+        g_recentTip = nullptr;
+        g_recentTipItem = -1;
         DestroyThemeFonts();
         return FALSE;
     case WM_COMMAND:
