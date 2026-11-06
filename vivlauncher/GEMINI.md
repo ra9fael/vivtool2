@@ -2,25 +2,27 @@
 
 ## Project Overview
 
-**vivtool2** is a Windows desktop application (`vivlauncher`) designed to streamline the process of launching Xilinx Vivado. It features automatic version detection from common installation paths and the Windows Registry, providing a selection dialog when multiple versions are found.
+**vivtool2** is a Windows desktop application (`vivlauncher`) designed to streamline the process of launching Xilinx Vivado. It detects installations from common paths, the Windows Registry and user-added paths, and opens a dark-themed main window (Projects / Diagnosis / Help) for choosing the project and installation.
 
 - **Primary Language:** C++20
 - **Framework:** Native Win32 API
 - **Target Platform:** Windows (x64)
-- **IDE:** Visual Studio 2022
+- **IDE:** Visual Studio with the MSVC v145 toolset
 
 ### Architecture
-The project is structured as a single Visual Studio solution containing the `vivlauncher` project.
-- `vivlauncher.cpp`: Entry point (`wWinMain`) and CLI argument parsing.
-- `VivadoDetector.cpp/h`: Logic for scanning directories and the registry for Vivado installations.
-- `SelectorDialog.cpp/h`: Win32 dialog-based UI for version selection.
+`vivlauncher/vivlauncher.slnx` contains the `vivlauncher` app and the `tests/vivlauncher_tests` console project.
+- `vivlauncher.cpp`: Entry point (`wWinMain`), DPI awareness and CLI argument parsing.
+- `VivadoDetector.cpp/h`: Scanning drives, registry and custom paths; settings, bindings and launching.
+- `VivadoLogic.h`: Header-only pure logic (version ordering, path normalization), unit-tested.
+- `SelectorDialog.cpp/h`: Main window, version selector and add-path dialogs, all owner-drawn.
+- `theme.h`: Dark color palette used by all custom drawing.
 - `vivlauncher.rc`: Resource definitions (dialogs, icons, strings).
 
 ## Building and Running
 
 ### Prerequisites
 - Windows 10/11
-- Visual Studio 2022 with **MSVC v145** toolset
+- Visual Studio with **MSVC v145** toolset (located automatically via vswhere)
 - Windows SDK 10.0
 
 ### Build Commands
@@ -33,9 +35,9 @@ The project is structured as a single Visual Studio solution containing the `viv
 **PowerShell Script (Recommended):**
 ```powershell
 cd vivlauncher
-.\build.ps1 [Debug|Release]
+.\build.ps1              # Release|x64
+.\build.ps1 -Tests       # also runs the unit tests
 ```
-By default, it builds the `Release` configuration for `x64`.
 
 **Manual Command Line (MSBuild):**
 ```batch
@@ -58,17 +60,23 @@ Output binaries are located in `vivlauncher/x64/<Configuration>/`.
 - **Braces:** Allman style (braces on their own line).
 - **Naming:** Follows standard Win32/Visual Studio template conventions (`InitInstance`, `WndProc`).
 - **Strings:** Use Unicode (`WCHAR`, `std::wstring`, `L"string"` literals) throughout.
+- **Filesystem:** Use the `std::error_code` overloads of `std::filesystem`.
+- **Encoding:** Keep source files ASCII-only (non-ASCII triggers C4819 under CP936).
+- **Commits:** Angular convention (`feat(ui): ...`, `fix(cli): ...`, `docs: ...`).
 
 ### UI & Resources
 - Use `Resource.h` for ID management (`IDD_*`, `IDC_*`, `IDI_*`).
-- Native Win32 dialogs are defined in `vivlauncher.rc`. Use the Visual Studio Resource Editor for modifications when possible.
+- Dialogs are defined in `vivlauncher.rc`. LISTBOX and EDITTEXT controls need `NOT WS_BORDER`; frames are drawn by the dialog.
+- Owner-drawn buttons must forward messages to the stock button proc and fill their full rect before drawing.
+- Every main-window control must belong to one page group in `ShowMainPage`.
 
 ### Testing
-- No automated test framework is present.
-- **Manual Verification:** Build in `Debug|x64`, verify CLI flags (`-l`), and test the version selection dialog by ensuring it detects local Vivado installations or custom paths.
+- `tests/vivlauncher_tests.cpp` covers the pure logic in `VivadoLogic.h`; run with `.\build.ps1 -Tests`.
+- **Manual Verification:** check the UI pages visually, and verify detection with `vivlauncher.exe --list` (redirect output to a file when running from a script).
 
 ## Key Files
 - `vivlauncher/vivlauncher.cpp`: Application lifecycle and CLI integration.
 - `vivlauncher/VivadoDetector.cpp`: Core logic for finding Xilinx installations.
-- `vivlauncher/SelectorDialog.cpp`: Implementation of the version selection UI.
+- `vivlauncher/SelectorDialog.cpp`: Main window and dialog UI.
+- `vivlauncher/theme.h`: Dark theme palette.
 - `vivlauncher/vivlauncher.vcxproj`: Project configuration and build settings.
