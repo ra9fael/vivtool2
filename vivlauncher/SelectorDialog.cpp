@@ -170,6 +170,79 @@ static void PaintEditBorders(HWND hDlg, HDC dc)
     }
 }
 
+// Single-line edits always draw text at the top-left of their client area.
+// Shrinking the client area in WM_NCCALCSIZE centers the text vertically and
+// adds horizontal padding; the reclaimed non-client band is painted EditBg.
+static std::map<HWND, WNDPROC> g_oldEditProcs;
+
+static LRESULT CALLBACK PaddedEditProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    WNDPROC oldProc = g_oldEditProcs[hWnd];
+    switch (message)
+    {
+    case WM_NCCALCSIZE:
+        if (wParam)
+        {
+            LRESULT r = CallWindowProcW(oldProc, hWnd, message, wParam, lParam);
+            RECT& rc = ((NCCALCSIZE_PARAMS*)lParam)->rgrc[0];
+            HDC dc = GetDC(hWnd);
+            HGDIOBJ oldFont = SelectObject(dc, (HFONT)SendMessageW(hWnd, WM_GETFONT, 0, 0));
+            TEXTMETRICW tm = {};
+            GetTextMetricsW(dc, &tm);
+            SelectObject(dc, oldFont);
+            int dpi = GetDeviceCaps(dc, LOGPIXELSX);
+            ReleaseDC(hWnd, dc);
+            int padY = ((rc.bottom - rc.top) - tm.tmHeight) / 2;
+            if (padY > 0)
+            {
+                rc.top += padY;
+                rc.bottom = rc.top + tm.tmHeight;
+            }
+            int padX = MulDiv(8, dpi, 96);
+            if (rc.right - rc.left > padX * 3)
+            {
+                rc.left += padX;
+                rc.right -= padX;
+            }
+            return r;
+        }
+        break;
+    case WM_NCPAINT:
+    {
+        HDC dc = GetWindowDC(hWnd);
+        RECT wr;
+        GetWindowRect(hWnd, &wr);
+        RECT cr;
+        GetClientRect(hWnd, &cr);
+        MapWindowPoints(hWnd, nullptr, (POINT*)&cr, 2);
+        OffsetRect(&cr, -wr.left, -wr.top);
+        OffsetRect(&wr, -wr.left, -wr.top);
+        ExcludeClipRect(dc, cr.left, cr.top, cr.right, cr.bottom);
+        FillRect(dc, &wr, GetThemeBrush(theme::EditBg));
+        ReleaseDC(hWnd, dc);
+        return 0;
+    }
+    case WM_NCHITTEST:
+        // Clicks on the padding band should still focus the field.
+        return HTCLIENT;
+    case WM_DESTROY:
+        g_oldEditProcs.erase(hWnd);
+        return CallWindowProcW(oldProc, hWnd, message, wParam, lParam);
+    }
+    return CallWindowProcW(oldProc, hWnd, message, wParam, lParam);
+}
+
+// Call after the edit's final font is set: the padding depends on text height.
+static void PadEdit(HWND hDlg, int id)
+{
+    HWND h = GetDlgItem(hDlg, id);
+    if (!h || g_oldEditProcs.count(h))
+        return;
+    g_oldEditProcs[h] = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)PaddedEditProc);
+    SetWindowPos(h, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static LRESULT CALLBACK OwnerButtonProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     auto it = g_btnVisual.find(hWnd);
@@ -461,8 +534,9 @@ static void MeasureHelpRow(HWND hDlg, int index, UINT& height)
         SelectObject(dc, g_fontNav);
         RECT rc = {};
         GetClientRect(GetDlgItem(hDlg, IDC_HELP_LIST), &rc);
-        int leftPad = row.type == HelpBullet ? MulDiv(18, dpi, 96) : MulDiv(2, dpi, 96);
-        RECT calc = { 0, 0, rc.right - leftPad - MulDiv(14, dpi, 96), 0 };
+        int leftPad = row.type == HelpBullet ? MulDiv(18, dpi, 96) : 0;
+        // Same 16px side insets that DrawHelpItem applies, plus scrollbar slack.
+        RECT calc = { 0, 0, rc.right - leftPad - MulDiv(32 + 4, dpi, 96), 0 };
         DrawTextW(dc, row.text, -1, &calc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
         h = calc.bottom - calc.top + MulDiv(8, dpi, 96);
     }
@@ -481,6 +555,8 @@ static void DrawHelpItem(const DRAWITEMSTRUCT* dis)
     int dpi = DpiForHwnd(dis->hwndItem);
     FillRect(dc, &rc, GetThemeBrush(theme::PanelBg));
     SetBkMode(dc, TRANSPARENT);
+    // Keep content clear of the panel edges.
+    InflateRect(&rc, -MulDiv(16, dpi, 96), 0);
 
     switch (row.type)
     {
@@ -738,6 +814,7 @@ INT_PTR CALLBACK AddPathDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         SubclassOwnerButton(hDlg, IDOK);
         SubclassOwnerButton(hDlg, IDCANCEL);
         SubclassOwnerButton(hDlg, IDC_BROWSE_BUTTON);
+        PadEdit(hDlg, IDC_PATH_EDIT);
         return (INT_PTR)TRUE;
     }
 
@@ -1029,6 +1106,8 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         SetWindowTextW(GetDlgItem(hDlg, IDC_CONFIG_PATH), GetSettingsFilePath().c_str());
         SendMessageW(GetDlgItem(hDlg, IDC_LOG_PATH), WM_SETFONT, (WPARAM)g_fontMono, TRUE);
         SendMessageW(GetDlgItem(hDlg, IDC_CONFIG_PATH), WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+        for (int id : { IDC_PROJECT_PATH, IDC_EXTRA_ARGS, IDC_LOG_PATH, IDC_CONFIG_PATH })
+            PadEdit(hDlg, id);
         PopulateHelpList(hDlg);
         PopulateMainInstallList(hDlg);
         PopulateRecentList(hDlg);
